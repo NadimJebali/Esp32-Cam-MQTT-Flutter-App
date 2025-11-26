@@ -16,9 +16,12 @@ class ESP32CamViewer extends StatefulWidget {
 class _ESP32CamViewerState extends State<ESP32CamViewer> {
   MqttServerClient? client;
   Uint8List? currentFrame;
+  Uint8List? _frameBuffer;
   bool isConnected = false;
   String statusMessage = 'Disconnected';
   int frameCount = 0;
+  DateTime? _lastFrameTime;
+  double fps = 0.0;
 
   // MQTT Configuration - UPDATE THESE WITH YOUR BROKER DETAILS
   final String broker = 'broker.hivemq.com'; // Or your HiveMQ cluster URL
@@ -47,10 +50,12 @@ class _ESP32CamViewerState extends State<ESP32CamViewer> {
       'flutter_viewer_${DateTime.now().millisecondsSinceEpoch}',
     );
     client!.port = port;
-    client!.keepAlivePeriod = 60;
+    client!.keepAlivePeriod = 20; // More frequent keep-alive
     client!.autoReconnect = true;
     client!.logging(on: false);
     client!.setProtocolV311();
+    client!.onDisconnected = _onDisconnected;
+    client!.onConnected = _onConnected;
 
     final connMessage = MqttConnectMessage()
         .withClientIdentifier(
@@ -96,10 +101,29 @@ class _ESP32CamViewerState extends State<ESP32CamViewer> {
               message.payload.message.toList(),
             );
 
-            setState(() {
-              currentFrame = imageBytes;
-              frameCount++;
-              statusMessage = 'Frame #$frameCount (${imageBytes.length} bytes)';
+            // Calculate FPS
+            final now = DateTime.now();
+            if (_lastFrameTime != null) {
+              final timeDiff = now.difference(_lastFrameTime!).inMilliseconds;
+              if (timeDiff > 0) {
+                fps = 1000.0 / timeDiff;
+              }
+            }
+            _lastFrameTime = now;
+
+            // Update frame immediately without waiting for setState
+            _frameBuffer = imageBytes;
+            frameCount++;
+
+            // Use post frame callback for smoother updates
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && _frameBuffer != null) {
+                setState(() {
+                  currentFrame = _frameBuffer;
+                  statusMessage =
+                      'Live • ${fps.toStringAsFixed(1)} FPS • Frame #$frameCount';
+                });
+              }
             });
           } else if (topic == topicStatus) {
             // Received status message
@@ -138,6 +162,20 @@ class _ESP32CamViewerState extends State<ESP32CamViewer> {
     }
   }
 
+  void _onConnected() {
+    print('MQTT Connected');
+  }
+
+  void _onDisconnected() {
+    print('MQTT Disconnected');
+    if (mounted) {
+      setState(() {
+        isConnected = false;
+        statusMessage = 'Disconnected - Reconnecting...';
+      });
+    }
+  }
+
   @override
   void dispose() {
     client?.disconnect();
@@ -172,7 +210,13 @@ class _ESP32CamViewerState extends State<ESP32CamViewer> {
                   ? Image.memory(
                       currentFrame!,
                       fit: BoxFit.contain,
-                      gaplessPlayback: true, // Smooth frame transition
+                      gaplessPlayback: true,
+                      filterQuality: FilterQuality.low, // Faster rendering
+                      cacheWidth: null,
+                      cacheHeight: null,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Icon(Icons.error, size: 48, color: Colors.red);
+                      },
                     )
                   : Text(
                       'Waiting for camera feed...',
